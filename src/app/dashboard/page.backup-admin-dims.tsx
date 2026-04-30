@@ -32,26 +32,16 @@ type UserProfile = {
   role: string;
 };
 
-type Dimensions = {
-  length?: string;
-  width?: string;
-  height?: string;
-};
-
 type Design = {
   id: string;
   tenantId: string;
   title: string;
   customerName: string;
   status: string;
-  approvalStage?: string;
   currentVersion: number;
   latestFileUrl?: string;
   latestFileName?: string;
   latestFileType?: string;
-  adminDimensions?: Dimensions | null;
-  clientDimensions?: Dimensions | null;
-  clientNotes?: string;
 };
 
 export default function DashboardPage() {
@@ -74,8 +64,6 @@ export default function DashboardPage() {
   const [approvalEmailByDesign, setApprovalEmailByDesign] = useState<Record<string, string>>({});
   const [approvalLinkByDesign, setApprovalLinkByDesign] = useState<Record<string, string>>({});
   const [creatingLinkForDesignId, setCreatingLinkForDesignId] = useState<string | null>(null);
-  const [adminDimensionsByDesign, setAdminDimensionsByDesign] = useState<Record<string, Dimensions>>({});
-  const [savingDimensionsForDesignId, setSavingDimensionsForDesignId] = useState<string | null>(null);
 
   useEffect(() => {
     const unsubAuth = auth.onAuthStateChanged(async (firebaseUser) => {
@@ -107,26 +95,12 @@ export default function DashboardPage() {
     );
 
     const unsub = onSnapshot(q, (snap) => {
-      const nextDesigns = snap.docs.map((d) => ({
-        id: d.id,
-        ...(d.data() as any),
-      })) as Design[];
-
-      setDesigns(nextDesigns);
-
-      setAdminDimensionsByDesign((prev) => {
-        const copy = { ...prev };
-        for (const design of nextDesigns) {
-          if (!copy[design.id]) {
-            copy[design.id] = {
-              length: design.adminDimensions?.length || "",
-              width: design.adminDimensions?.width || "",
-              height: design.adminDimensions?.height || "",
-            };
-          }
-        }
-        return copy;
-      });
+      setDesigns(
+        snap.docs.map((d) => ({
+          id: d.id,
+          ...(d.data() as any),
+        }))
+      );
     });
 
     return () => unsub();
@@ -338,43 +312,6 @@ export default function DashboardPage() {
     }
   }
 
-  async function saveAdminDimensions(design: Design) {
-    if (!user) return;
-
-    const dimensions = adminDimensionsByDesign[design.id] || {};
-
-    setSavingDimensionsForDesignId(design.id);
-
-    try {
-      await updateDoc(doc(db, "designs", design.id), {
-        adminDimensions: {
-          length: dimensions.length || "",
-          width: dimensions.width || "",
-          height: dimensions.height || "",
-        },
-        approvalStage: "needs_approval",
-        updatedAt: serverTimestamp(),
-      });
-
-      await setDoc(doc(db, "auditLogs", crypto.randomUUID()), {
-        tenantId: user.tenantId,
-        actorUid: user.uid,
-        actorEmail: user.email,
-        action: "ADMIN_DIMENSIONS_SAVED",
-        module: "designs",
-        targetType: "design",
-        targetId: design.id,
-        message: `Admin dimensions saved for: ${design.title}`,
-        metadata: {
-          dimensions,
-        },
-        createdAt: serverTimestamp(),
-      });
-    } finally {
-      setSavingDimensionsForDesignId(null);
-    }
-  }
-
   async function generateApprovalLink(design: Design) {
     if (!user) return;
 
@@ -564,14 +501,9 @@ export default function DashboardPage() {
                       Version: V{d.currentVersion || 1}
                     </p>
 
-                    <div className="mt-2 flex flex-wrap gap-2">
-                      <span className="inline-flex rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase">
-                        {d.status}
-                      </span>
-                      <span className="inline-flex rounded-full bg-blue-50 px-3 py-1 text-xs font-semibold uppercase text-blue-700">
-                        {d.approvalStage || "needs_approval"}
-                      </span>
-                    </div>
+                    <span className="mt-2 inline-flex rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase">
+                      {d.status}
+                    </span>
 
                     {d.latestFileUrl && d.latestFileType?.startsWith("image/") && (
                       <div className="mt-3 overflow-hidden rounded-xl border bg-slate-50">
@@ -595,78 +527,6 @@ export default function DashboardPage() {
                         </a>
                       </div>
                     )}
-
-                    <div className="mt-4 rounded-xl border bg-white p-4">
-                      <label className="block text-xs font-semibold text-slate-500">
-                        Admin product dimensions / specs
-                      </label>
-
-                      <div className="mt-3 grid gap-2 md:grid-cols-3">
-                        <input
-                          placeholder="Length (cm)"
-                          value={adminDimensionsByDesign[d.id]?.length || ""}
-                          onChange={(e) =>
-                            setAdminDimensionsByDesign((prev) => ({
-                              ...prev,
-                              [d.id]: {
-                                ...(prev[d.id] || {}),
-                                length: e.target.value,
-                              },
-                            }))
-                          }
-                          className="rounded-lg border px-3 py-2 text-sm"
-                        />
-
-                        <input
-                          placeholder="Width (cm)"
-                          value={adminDimensionsByDesign[d.id]?.width || ""}
-                          onChange={(e) =>
-                            setAdminDimensionsByDesign((prev) => ({
-                              ...prev,
-                              [d.id]: {
-                                ...(prev[d.id] || {}),
-                                width: e.target.value,
-                              },
-                            }))
-                          }
-                          className="rounded-lg border px-3 py-2 text-sm"
-                        />
-
-                        <input
-                          placeholder="Height (cm)"
-                          value={adminDimensionsByDesign[d.id]?.height || ""}
-                          onChange={(e) =>
-                            setAdminDimensionsByDesign((prev) => ({
-                              ...prev,
-                              [d.id]: {
-                                ...(prev[d.id] || {}),
-                                height: e.target.value,
-                              },
-                            }))
-                          }
-                          className="rounded-lg border px-3 py-2 text-sm"
-                        />
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => saveAdminDimensions(d)}
-                        disabled={savingDimensionsForDesignId === d.id}
-                        className="mt-3 rounded-lg bg-slate-800 px-3 py-2 text-sm font-semibold text-white disabled:opacity-50"
-                      >
-                        {savingDimensionsForDesignId === d.id ? "Saving..." : "Save Dimensions"}
-                      </button>
-
-                      {d.clientDimensions && (
-                        <div className="mt-4 rounded-lg bg-green-50 p-3 text-sm text-green-800">
-                          <p className="font-bold">Client submitted dimensions</p>
-                          <p>
-                            L: {d.clientDimensions.length || "-"} cm · W: {d.clientDimensions.width || "-"} cm · H: {d.clientDimensions.height || "-"} cm
-                          </p>
-                          {d.clientNotes && <p className="mt-1">Notes: {d.clientNotes}</p>}
-                        </div>
-                      )}
-                    </div>
 
                     <div className="mt-4 rounded-xl border bg-slate-50 p-4">
                       <label className="block text-xs font-semibold text-slate-500">
