@@ -15,7 +15,11 @@ import {
   where,
 } from "firebase/firestore";
 import { signOut } from "firebase/auth";
-import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
+import {
+  getDownloadURL,
+  ref,
+  uploadBytesResumable,
+} from "firebase/storage";
 import { auth, db, storage } from "@/lib/firebaseClient";
 import { APP_NAME } from "@/lib/appConfig";
 import { compressImageForApproval } from "@/lib/imageCompression";
@@ -37,6 +41,7 @@ type Design = {
   currentVersion: number;
   latestFileUrl?: string;
   latestFileName?: string;
+  latestFileType?: string;
 };
 
 export default function DashboardPage() {
@@ -49,9 +54,13 @@ export default function DashboardPage() {
   const [title, setTitle] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [file, setFile] = useState<File | null>(null);
+  const [localPreviewUrl, setLocalPreviewUrl] = useState("");
   const [creating, setCreating] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [error, setError] = useState("");
 
   const [uploadingDesignId, setUploadingDesignId] = useState<string | null>(null);
+  const [versionUploadProgress, setVersionUploadProgress] = useState<Record<string, number>>({});
 
   useEffect(() => {
     const unsubAuth = auth.onAuthStateChanged(async (firebaseUser) => {
@@ -94,10 +103,20 @@ export default function DashboardPage() {
     return () => unsub();
   }, [user?.tenantId]);
 
+  function onMainFileChange(selectedFile: File | null) {
+    setFile(selectedFile);
+    setLocalPreviewUrl("");
+
+    if (selectedFile && selectedFile.type.startsWith("image/")) {
+      setLocalPreviewUrl(URL.createObjectURL(selectedFile));
+    }
+  }
+
   async function uploadDesignFile(params: {
     designId: string;
     versionNo: number;
     fileToUpload: File;
+    onProgress?: (progress: number) => void;
   }) {
     if (!user) throw new Error("User missing");
 
@@ -109,11 +128,25 @@ export default function DashboardPage() {
 
     const fileRef = ref(storage, storagePath);
 
-    await uploadBytes(fileRef, uploadFile, {
+    const uploadTask = uploadBytesResumable(fileRef, uploadFile, {
       contentType: uploadFile.type || "application/octet-stream",
     });
 
-    const downloadUrl = await getDownloadURL(fileRef);
+    await new Promise<void>((resolve, reject) => {
+      uploadTask.on(
+        "state_changed",
+        (snapshot) => {
+          const progress = Math.round(
+            (snapshot.bytesTransferred / snapshot.totalBytes) * 100
+          );
+          params.onProgress?.(progress);
+        },
+        (uploadError) => reject(uploadError),
+        () => resolve()
+      );
+    });
+
+    const downloadUrl = await getDownloadURL(uploadTask.snapshot.ref);
 
     return {
       storagePath,
@@ -132,6 +165,8 @@ export default function DashboardPage() {
     if (!user || !file) return;
 
     setCreating(true);
+    setError("");
+    setUploadProgress(0);
 
     try {
       const designId = crypto.randomUUID();
@@ -141,6 +176,7 @@ export default function DashboardPage() {
         designId,
         versionNo: 1,
         fileToUpload: file,
+        onProgress: setUploadProgress,
       });
 
       await setDoc(doc(db, "designs", designId), {
@@ -153,6 +189,7 @@ export default function DashboardPage() {
         latestVersionId: versionId,
         latestFileUrl: uploaded.downloadUrl,
         latestFileName: uploaded.fileName,
+        latestFileType: uploaded.fileType,
         latestStoragePath: uploaded.storagePath,
         createdBy: user.uid,
         createdByEmail: user.email,
@@ -167,8 +204,11 @@ export default function DashboardPage() {
         versionNo: 1,
         status: "current",
         fileName: uploaded.fileName,
+        originalFileName: uploaded.originalFileName,
         fileSize: uploaded.fileSize,
+        originalFileSize: uploaded.originalFileSize,
         fileType: uploaded.fileType,
+        wasCompressed: uploaded.wasCompressed,
         fileUrl: uploaded.downloadUrl,
         storagePath: uploaded.storagePath,
         uploadedBy: user.uid,
@@ -191,9 +231,13 @@ export default function DashboardPage() {
       setTitle("");
       setCustomerName("");
       setFile(null);
+      setLocalPreviewUrl("");
+      setUploadProgress(0);
 
       const fileInput = document.getElementById("design-file") as HTMLInputElement | null;
       if (fileInput) fileInput.value = "";
+    } catch (err: any) {
+      setError(err?.message || "Upload failed");
     } finally {
       setCreating(false);
     }
@@ -203,6 +247,7 @@ export default function DashboardPage() {
     if (!user) return;
 
     setUploadingDesignId(design.id);
+    setVersionUploadProgress((prev) => ({ ...prev, [design.id]: 0 }));
 
     try {
       const nextVersion = (design.currentVersion || 1) + 1;
@@ -212,6 +257,9 @@ export default function DashboardPage() {
         designId: design.id,
         versionNo: nextVersion,
         fileToUpload,
+        onProgress: (progress) => {
+          setVersionUploadProgress((prev) => ({ ...prev, [design.id]: progress }));
+        },
       });
 
       await setDoc(doc(db, "designVersions", versionId), {
@@ -221,8 +269,11 @@ export default function DashboardPage() {
         versionNo: nextVersion,
         status: "current",
         fileName: uploaded.fileName,
+        originalFileName: uploaded.originalFileName,
         fileSize: uploaded.fileSize,
+        originalFileSize: uploaded.originalFileSize,
         fileType: uploaded.fileType,
+        wasCompressed: uploaded.wasCompressed,
         fileUrl: uploaded.downloadUrl,
         storagePath: uploaded.storagePath,
         uploadedBy: user.uid,
@@ -236,6 +287,7 @@ export default function DashboardPage() {
         latestVersionId: versionId,
         latestFileUrl: uploaded.downloadUrl,
         latestFileName: uploaded.fileName,
+        latestFileType: uploaded.fileType,
         latestStoragePath: uploaded.storagePath,
         updatedAt: serverTimestamp(),
       });
@@ -253,6 +305,7 @@ export default function DashboardPage() {
       });
     } finally {
       setUploadingDesignId(null);
+      setVersionUploadProgress((prev) => ({ ...prev, [design.id]: 0 }));
     }
   }
 
@@ -335,9 +388,40 @@ export default function DashboardPage() {
               type="file"
               required
               accept="image/*,.pdf,.ai,.psd,.cdr,.zip"
-              onChange={(e) => setFile(e.target.files?.[0] || null)}
+              onChange={(e) => onMainFileChange(e.target.files?.[0] || null)}
               className="w-full rounded-xl border bg-white px-4 py-3"
             />
+
+            {localPreviewUrl && (
+              <div className="overflow-hidden rounded-xl border bg-slate-50">
+                <img
+                  src={localPreviewUrl}
+                  alt="Selected design preview"
+                  className="max-h-64 w-full object-contain"
+                />
+              </div>
+            )}
+
+            {creating && (
+              <div>
+                <div className="mb-2 flex justify-between text-sm font-semibold text-slate-600">
+                  <span>Uploading</span>
+                  <span>{uploadProgress}%</span>
+                </div>
+                <div className="h-3 overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-full bg-slate-950 transition-all"
+                    style={{ width: `${uploadProgress}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {error && (
+              <div className="rounded-xl bg-red-50 p-3 text-sm text-red-700">
+                {error}
+              </div>
+            )}
 
             <button
               disabled={creating || !file}
@@ -361,7 +445,7 @@ export default function DashboardPage() {
             {designs.map((d) => (
               <div key={d.id} className="rounded-xl border p-4">
                 <div className="flex items-start justify-between gap-4">
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <h3 className="font-bold">{d.title}</h3>
                     <p className="text-sm text-slate-500">
                       Customer: {d.customerName}
@@ -373,6 +457,16 @@ export default function DashboardPage() {
                     <span className="mt-2 inline-flex rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold uppercase">
                       {d.status}
                     </span>
+
+                    {d.latestFileUrl && d.latestFileType?.startsWith("image/") && (
+                      <div className="mt-3 overflow-hidden rounded-xl border bg-slate-50">
+                        <img
+                          src={d.latestFileUrl}
+                          alt={d.latestFileName || d.title}
+                          className="max-h-72 w-full object-contain"
+                        />
+                      </div>
+                    )}
 
                     {d.latestFileUrl && (
                       <div className="mt-3">
@@ -403,6 +497,21 @@ export default function DashboardPage() {
                         className="mt-2 w-full rounded-lg border bg-white px-3 py-2 text-sm"
                       />
                     </div>
+
+                    {uploadingDesignId === d.id && (
+                      <div className="mt-3">
+                        <div className="mb-2 flex justify-between text-sm font-semibold text-slate-600">
+                          <span>Uploading new version</span>
+                          <span>{versionUploadProgress[d.id] || 0}%</span>
+                        </div>
+                        <div className="h-3 overflow-hidden rounded-full bg-slate-200">
+                          <div
+                            className="h-full bg-slate-950 transition-all"
+                            style={{ width: `${versionUploadProgress[d.id] || 0}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex shrink-0 flex-col gap-2">
@@ -420,12 +529,6 @@ export default function DashboardPage() {
                     </button>
                   </div>
                 </div>
-
-                {uploadingDesignId === d.id && (
-                  <p className="mt-3 text-sm font-semibold text-slate-500">
-                    Uploading new version...
-                  </p>
-                )}
               </div>
             ))}
           </div>
