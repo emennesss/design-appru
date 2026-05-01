@@ -30,7 +30,7 @@ export default function SuperadminDashboard() {
       }
 
       if (email !== SUPERADMIN_EMAIL) {
-        router.push("/dashboard");
+        
         return;
       }
 

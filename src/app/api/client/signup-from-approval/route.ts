@@ -54,6 +54,7 @@ export async function POST(req: NextRequest) {
         email,
         name: decoded.name || email,
         role: "client",
+        side: "client",
         status: "active",
         customerName: design.customerName || "",
         linkedApprovalLinkId: tokenId,

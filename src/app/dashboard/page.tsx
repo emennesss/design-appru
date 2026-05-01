@@ -2,50 +2,63 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import AuthGuard from "@/components/AuthGuard";
 import { collection, query, where, onSnapshot } from "firebase/firestore";
 import { auth, db } from "@/lib/firebaseClient";
 import TopBar from "@/components/TopBar";
 import { getUserSide } from "@/lib/userRoles";
+import { hasPermission, roleLabel } from "@/lib/permissions";
 
 export default function DesignerDashboard() {
-  const router = useRouter();
+  const router = useRouter(
+  );
 
-  const [user, setUser] = useState<any>(null);
-  const [designs, setDesigns] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [user, setUser] = useState<any>(null
+  );
+  const [designs, setDesigns] = useState<any[]>([]
+  );
+  const [loading, setLoading] = useState(true
+  );
 
   useEffect(() => {
     const unsub = auth.onAuthStateChanged(async (firebaseUser) => {
       if (!firebaseUser?.email) {
-        router.push("/login");
+        router.push("/login"
+  );
         return;
       }
 
-      const email = firebaseUser.email.toLowerCase();
-      const res = await fetch(`/api/users/get?email=${encodeURIComponent(email)}`).then((r) => r.json());
+      const email = firebaseUser.email.toLowerCase(
+  );
+      const res = await fetch(`/api/users/get?email=${encodeURIComponent(email)}`).then((r) => r.json()
+  );
 
       if (!res.user) {
-        alert("User profile not found.");
-        router.push("/login");
-        return;
-      }
-
-      if (res.user.role === "superadmin") {
-        router.push("/superadmin");
+        alert("User profile not found."
+  );
+        router.push("/login"
+  );
         return;
       }
 
       if (getUserSide(res.user) === "client") {
-        router.push("/client/dashboard");
+        router.push("/client/dashboard"
+  );
         return;
       }
 
-      setUser(res.user);
-      setLoading(false);
-    });
+      setUser(res.user
+  );
+      setLoading(false
+  );
+    }
+  );
 
-    return () => unsub();
-  }, [router]);
+    return (
+    ) => unsub(
+  );
+  }, [router]
+  );
 
   useEffect(() => {
     if (!user?.designerOrgId && !user?.tenantId) return;
@@ -55,7 +68,8 @@ export default function DesignerDashboard() {
     const q = query(
       collection(db, "designs"),
       where("designerOrgId", "==", designerOrgId)
-    );
+    
+  );
 
     const unsub = onSnapshot(q, (snap) => {
       const rows = snap.docs
@@ -64,39 +78,53 @@ export default function DesignerDashboard() {
           const av = a.updatedAt?.seconds || a.createdAt?.seconds || 0;
           const bv = b.updatedAt?.seconds || b.createdAt?.seconds || 0;
           return bv - av;
-        });
+        }
+  );
 
-      setDesigns(rows);
-    });
+      setDesigns(rows
+  );
+    }
+  );
 
-    return () => unsub();
-  }, [user]);
+    return (
+    ) => unsub(
+  );
+  }, [user]
+  );
 
-  const grouped = useMemo(() => groupByClientAndApprover(designs), [designs]);
+  const grouped = useMemo(() => groupByClientAndApprover(designs), [designs]
+  );
 
-  const pending = designs.filter((d) => ["sent", "uploaded"].includes(d.status));
-  const revision = designs.filter((d) => d.status === "revision_requested");
-  const approved = designs.filter((d) => d.status === "approved");
-  const frozen = designs.filter((d) => d.status === "frozen");
+  const pending = designs.filter((d) => ["sent", "uploaded"].includes(d.status)
+  );
+  const revision = designs.filter((d) => d.status === "revision_requested"
+  );
+  const approved = designs.filter((d) => d.status === "approved"
+  );
+  const frozen = designs.filter((d) => d.status === "frozen"
+  );
 
   if (loading) {
     return (
+    
       <div>
         <TopBar />
         <div style={{ padding: 24 }}>Loading designer dashboard...</div>
       </div>
-    );
+    
+  );
   }
 
   return (
+    
     <div>
       <TopBar />
 
       <main style={{ padding: 24, maxWidth: 1400, margin: "0 auto" }}>
-        <h1>Designer Dashboard</h1>
+        <h1>Company Dashboard</h1>
 
         <p style={{ color: "#666" }}>
-          Role: <b>{user?.role}</b> | Designer Org: <b>{user?.designerOrgId || user?.tenantId}</b>
+          Role: <b>{roleLabel(user?.role)}</b> | Company: <b>{user?.designerOrgId || user?.tenantId}</b>
         </p>
 
         <div style={statGrid}>
@@ -145,11 +173,13 @@ export default function DesignerDashboard() {
         )}
       </main>
     </div>
+  
   );
 }
 
 function groupByClientAndApprover(designs: any[]) {
-  const clientMap = new Map<string, any>();
+  const clientMap = new Map<string, any>(
+  );
 
   for (const d of designs) {
     const clientOrgId = d.clientOrgId || "unlinked_client";
@@ -163,10 +193,12 @@ function groupByClientAndApprover(designs: any[]) {
         clientName,
         total: 0,
         approverMap: new Map<string, any>(),
-      });
+      }
+  );
     }
 
-    const client = clientMap.get(clientKey);
+    const client = clientMap.get(clientKey
+  );
     client.total += 1;
 
     const emails =
@@ -175,28 +207,33 @@ function groupByClientAndApprover(designs: any[]) {
         : [d.latestApprovalRecipientEmail || d.approverEmail || "not_assigned"];
 
     for (const email of emails) {
-      const approverKey = String(email || "not_assigned").toLowerCase();
+      const approverKey = String(email || "not_assigned").toLowerCase(
+  );
 
       if (!client.approverMap.has(approverKey)) {
         client.approverMap.set(approverKey, {
           approverKey,
           approverEmail: approverKey === "not_assigned" ? "" : approverKey,
           designs: [],
-        });
+        }
+  );
       }
 
-      client.approverMap.get(approverKey).designs.push(d);
+      client.approverMap.get(approverKey).designs.push(d
+  );
     }
   }
 
   return Array.from(clientMap.values()).map((client) => ({
     ...client,
     approvers: Array.from(client.approverMap.values()),
-  }));
+  })
+  );
 }
 
 function DesignRow({ d }: any) {
   return (
+    
     <div style={designRow}>
       <div>
         <h3 style={{ margin: 0 }}>{d.title || "Untitled Design"}</h3>
@@ -223,6 +260,7 @@ function DesignRow({ d }: any) {
         </a>
       </div>
     </div>
+  
   );
 }
 
@@ -230,6 +268,7 @@ function StatusBadge({ status }: any) {
   const label = status || "-";
 
   return (
+    
     <span style={{
       padding: "3px 8px",
       borderRadius: 999,
@@ -241,29 +280,35 @@ function StatusBadge({ status }: any) {
     }}>
       {label}
     </span>
+  
   );
 }
 
 function Stat({ title, value }: any) {
   return (
+    
     <div style={statCard}>
       <div style={{ color: "#666", fontSize: 14 }}>{title}</div>
       <div style={{ fontSize: 30, fontWeight: 800 }}>{value}</div>
     </div>
+  
   );
 }
 
 function Empty({ text }: any) {
   return (
+    
     <div style={{ padding: 16, background: "#f9fafb", border: "1px solid #eee", borderRadius: 10 }}>
       {text}
     </div>
+  
   );
 }
 
 function formatDate(v: any) {
   if (!v?.seconds) return "-";
-  return new Date(v.seconds * 1000).toLocaleString();
+  return new Date(v.seconds * 1000).toLocaleString(
+  );
 }
 
 const statGrid: React.CSSProperties = {

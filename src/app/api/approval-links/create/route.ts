@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
 import { createApprovalToken } from "@/lib/tokenSecurity";
 import { Timestamp } from "firebase-admin/firestore";
+import { hasPermission } from "@/lib/permissions";
 
 async function getActor(req: NextRequest) {
   const authHeader = req.headers.get("authorization") || "";
@@ -42,8 +43,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Valid recipient email is required" }, { status: 400 });
     }
 
-    const allowedRoles = ["superadmin", "admin", "designer"];
-    if (!allowedRoles.includes(actor.role)) {
+    if (!hasPermission(actor.role, "approval_send")) {
       return NextResponse.json({ error: "Not allowed to create approval links" }, { status: 403 });
     }
 

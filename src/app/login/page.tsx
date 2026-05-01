@@ -12,6 +12,7 @@ import {
 import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
 import { auth, db } from "@/lib/firebaseClient";
 import { APP_NAME } from "@/lib/appConfig";
+import { homePathForRole } from "@/lib/permissions";
 
 function slugifyCompany(value: string) {
   return (
@@ -93,7 +94,7 @@ export default function LoginPage() {
             tenantId,
             email: cleanEmail,
             name: name.trim() || cleanEmail,
-            role: "superadmin",
+            role: "admin",
             status: "active",
             emailVerified: false,
             createdAt: serverTimestamp(),
@@ -110,7 +111,7 @@ export default function LoginPage() {
           module: "auth",
           targetType: "tenant",
           targetId: tenantId,
-          message: "New company account created with owner as superadmin.",
+          message: "New company account created with owner as admin.",
           createdAt: serverTimestamp(),
         });
 
@@ -124,7 +125,7 @@ export default function LoginPage() {
       const snap = await getDoc(doc(db, "users", cred.user.uid));
 
       if (!snap.exists()) {
-        throw new Error("Login exists in Firebase, but no app user profile was found. Ask superadmin to add this user.");
+        throw new Error("Login exists in Firebase, but no app user profile was found. Ask admin to add this user.");
       }
 
       const user = snap.data() as any;
@@ -133,7 +134,7 @@ export default function LoginPage() {
         throw new Error("Your account is not active.");
       }
 
-      router.push(user.role === "client" ? "/client/dashboard" : "/dashboard");
+      router.push(homePathForRole(user.role));
     } catch (err: any) {
       setError(err?.message || "Login failed");
     } finally {
