@@ -1,13 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebaseAdmin";
-import { hashSecret, parsePublicToken } from "@/lib/tokenSecurity";
 
 export async function GET(req: NextRequest) {
   try {
-    const publicToken = req.nextUrl.searchParams.get("token") || "";
-    const { tokenId, secret } = parsePublicToken(publicToken);
+    const token = req.nextUrl.searchParams.get("token");
 
-    const linkSnap = await adminDb.collection("approvalLinks").doc(tokenId).get();
+    if (!token) {
+      return NextResponse.json({ error: "Missing token" }, { status: 400 });
+    }
+
+    const linkRef = adminDb.collection("approvalLinks").doc(token);
+    const linkSnap = await linkRef.get();
 
     if (!linkSnap.exists) {
       return NextResponse.json({ error: "Invalid approval link" }, { status: 404 });
@@ -15,12 +18,8 @@ export async function GET(req: NextRequest) {
 
     const link = linkSnap.data() as any;
 
-    if (link.tokenHash !== hashSecret(secret)) {
-      return NextResponse.json({ error: "Invalid approval link" }, { status: 404 });
-    }
-
-    if (link.expiresAt?.toMillis && link.expiresAt.toMillis() < Date.now()) {
-      return NextResponse.json({ error: "Approval link has expired" }, { status: 410 });
+    if (!link.designId) {
+      return NextResponse.json({ error: "Approval link missing designId" }, { status: 400 });
     }
 
     const designSnap = await adminDb.collection("designs").doc(link.designId).get();
@@ -31,18 +30,13 @@ export async function GET(req: NextRequest) {
 
     const design = designSnap.data() as any;
 
-    if (design.tenantId !== link.tenantId) {
-      return NextResponse.json({ error: "Approval link mismatch" }, { status: 403 });
-    }
-
     return NextResponse.json({
-      token: publicToken,
+      token,
       link: {
-        id: tokenId,
+        id: token,
         recipientEmail: link.recipientEmail || "",
         status: link.status || design.status || "pending",
         finalized: link.finalized === true || ["approved", "rejected"].includes(link.status),
-        expiresAt: link.expiresAt?.toDate ? link.expiresAt.toDate().toISOString() : null,
         adminDimensions: link.adminDimensions || design.adminDimensions || null,
         clientDimensions: link.clientDimensions || design.clientDimensions || null,
         clientNotes: link.clientNotes || design.clientNotes || "",
@@ -62,8 +56,8 @@ export async function GET(req: NextRequest) {
         clientNotes: design.clientNotes || link.clientNotes || "",
       },
     });
-  } catch (err: any) {
+  } catch (err) {
     console.error("approval read error", err);
-    return NextResponse.json({ error: err?.message || "Server error" }, { status: 400 });
+    return NextResponse.json({ error: "Server error" }, { status: 500 });
   }
 }

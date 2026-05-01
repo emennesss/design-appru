@@ -1,21 +1,50 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebaseAdmin";
-import { v4 as uuidv4 } from "uuid";
+import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
+import { createApprovalToken } from "@/lib/tokenSecurity";
 import { Timestamp } from "firebase-admin/firestore";
-import { normalizeEmail, safeId } from "@/lib/userRoles";
+
+async function getActor(req: NextRequest) {
+  const authHeader = req.headers.get("authorization") || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+
+  if (!token) throw new Error("Missing login token");
+
+  const decoded = await adminAuth.verifyIdToken(token);
+  const userSnap = await adminDb.collection("users").doc(decoded.uid).get();
+
+  if (!userSnap.exists) throw new Error("User profile not found");
+
+  const user = userSnap.data() as any;
+
+  if (user.status !== "active") throw new Error("User is not active");
+
+  return {
+    uid: decoded.uid,
+    email: decoded.email || user.email || "",
+    tenantId: user.tenantId,
+    role: user.role,
+  };
+}
 
 export async function POST(req: NextRequest) {
   try {
+    const actor = await getActor(req);
     const body = await req.json();
-    const { designId, recipientEmail } = body;
+
+    const designId = String(body.designId || "").trim();
+    const recipientEmail = String(body.recipientEmail || "").trim().toLowerCase();
 
     if (!designId) {
       return NextResponse.json({ error: "Missing designId" }, { status: 400 });
     }
 
-    const cleanEmail = normalizeEmail(recipientEmail || "");
-    if (!cleanEmail) {
-      return NextResponse.json({ error: "Recipient email required" }, { status: 400 });
+    if (!recipientEmail || !recipientEmail.includes("@")) {
+      return NextResponse.json({ error: "Valid recipient email is required" }, { status: 400 });
+    }
+
+    const allowedRoles = ["superadmin", "admin", "designer"];
+    if (!allowedRoles.includes(actor.role)) {
+      return NextResponse.json({ error: "Not allowed to create approval links" }, { status: 403 });
     }
 
     const designRef = adminDb.collection("designs").doc(designId);
@@ -26,88 +55,52 @@ export async function POST(req: NextRequest) {
     }
 
     const design = designSnap.data() as any;
+
+    if (!design.tenantId || design.tenantId !== actor.tenantId) {
+      return NextResponse.json({ error: "Design does not belong to your company" }, { status: 403 });
+    }
+
+    const { tokenId, tokenHash, publicToken } = createApprovalToken();
     const now = Timestamp.now();
+    const expiresAt = Timestamp.fromMillis(Date.now() + 1000 * 60 * 60 * 24 * 14);
 
-    const designerOrgId = design.designerOrgId || design.tenantId || "default";
-    const clientOrgId = design.clientOrgId || `client_${safeId(cleanEmail)}`;
-    const organizationLinkId = `${designerOrgId}__${clientOrgId}`;
-    const token = uuidv4();
-
-    await adminDb.collection("designerOrganizations").doc(designerOrgId).set({
-      id: designerOrgId,
-      tenantId: designerOrgId,
-      name: design.designerOrgName || design.tenantName || "Designer Organization",
-      status: "active",
-      updatedAt: now,
-      createdAt: design.createdAt || now,
-    }, { merge: true });
-
-    await adminDb.collection("clientOrganizations").doc(clientOrgId).set({
-      id: clientOrgId,
-      primaryEmail: cleanEmail,
-      name: design.customerName || cleanEmail,
-      status: "active",
-      updatedAt: now,
-      createdAt: now,
-    }, { merge: true });
-
-    await adminDb.collection("organizationLinks").doc(organizationLinkId).set({
-      id: organizationLinkId,
-      designerOrgId,
-      clientOrgId,
-      status: "active",
-      relationshipType: "design_approval",
-      createdFromDesignId: designId,
-      updatedAt: now,
-      createdAt: now,
-    }, { merge: true });
-
-    await adminDb.collection("approvalLinks").doc(token).set({
-      token,
+    await adminDb.collection("approvalLinks").doc(tokenId).set({
+      tokenId,
+      tokenHash,
       designId,
-      designerOrgId,
-      clientOrgId,
-      organizationLinkId,
-      tenantId: design.tenantId || designerOrgId,
-      recipientEmail: cleanEmail,
+      tenantId: design.tenantId,
+      recipientEmail,
       status: "sent",
-      versionNo: design.currentVersion || 1,
-      versionFileUrl: design.latestFileUrl || "",
-      versionFileName: design.latestFileName || "",
       finalized: false,
       tokenUsed: false,
+      expiresAt,
       adminDimensions: design.adminDimensions || null,
       clientDimensions: null,
       clientNotes: null,
+      createdByUid: actor.uid,
+      createdByEmail: actor.email,
       createdAt: now,
       updatedAt: now,
     });
 
     await designRef.update({
-      designerOrgId,
-      clientOrgId,
-      organizationLinkId,
-      approvalStage: `v${design.currentVersion || 1}_sent_to_client`,
+      approvalStage: "sent_to_client",
       status: "sent",
-      approvalVersion: design.currentVersion || 1,
-      latestApprovalToken: token,
-      latestApprovalRecipientEmail: cleanEmail,
-      assignedApproverEmails: Array.from(new Set([...(design.assignedApproverEmails || []), cleanEmail])),
+      latestApprovalToken: publicToken,
+      latestApprovalRecipientEmail: recipientEmail,
       updatedAt: now,
     });
 
     await adminDb.collection("auditLogs").doc(crypto.randomUUID()).set({
-      tenantId: design.tenantId || designerOrgId,
-      designerOrgId,
-      clientOrgId,
-      organizationLinkId,
-      actorUid: "server",
-      actorEmail: "system",
+      tenantId: design.tenantId,
+      actorUid: actor.uid,
+      actorEmail: actor.email,
       action: "APPROVAL_LINK_CREATED",
-      module: "approvalLinks",
+      module: "approval-links",
       targetType: "design",
       targetId: designId,
-      message: `Approval link created for ${cleanEmail}`,
+      message: `Approval link created for ${recipientEmail}`,
+      metadata: { designId, recipientEmail },
       createdAt: now,
     });
 
@@ -121,13 +114,11 @@ export async function POST(req: NextRequest) {
       (host ? `${proto}://${host}` : "http://localhost:3000");
 
     return NextResponse.json({
-      approvalUrl: `${baseUrl}/client-approval/${token}`,
-      organizationLinkId,
-      designerOrgId,
-      clientOrgId,
+      approvalUrl: `${baseUrl}/client-approval/${publicToken}`,
+      expiresAt: expiresAt.toDate().toISOString(),
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("approval create error", err);
-    return NextResponse.json({ error: "Server error" }, { status: 500 });
+    return NextResponse.json({ error: err?.message || "Server error" }, { status: 500 });
   }
 }

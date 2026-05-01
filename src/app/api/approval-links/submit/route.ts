@@ -1,149 +1,107 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebaseAdmin";
+import { hashSecret, parsePublicToken } from "@/lib/tokenSecurity";
 import { Timestamp } from "firebase-admin/firestore";
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
 
-    const token = body.token;
-    const decision = body.decision;
+    const publicToken = String(body.token || "");
+    const decision = String(body.decision || "");
     const dimensions = body.dimensions || {};
-    const notes = body.notes || "";
+    const notes = String(body.notes || "");
 
-    if (!token || !["approved", "rejected"].includes(decision)) {
+    if (!publicToken || !["approved", "rejected"].includes(decision)) {
       return NextResponse.json({ error: "Invalid request" }, { status: 400 });
     }
 
-    const linkRef = adminDb.collection("approvalLinks").doc(token);
-    const linkSnap = await linkRef.get();
-
-    if (!linkSnap.exists) {
-      return NextResponse.json({ error: "Invalid approval link" }, { status: 404 });
+    if (decision === "approved") {
+      if (!dimensions.length || !dimensions.width || !dimensions.height) {
+        return NextResponse.json(
+          { error: "Length, width and height are required before approval." },
+          { status: 400 }
+        );
+      }
     }
 
-    const link = linkSnap.data() as any;
-
-    const designRef = adminDb.collection("designs").doc(link.designId);
-    const designSnap = await designRef.get();
-
-    if (!designSnap.exists) {
-      return NextResponse.json({ error: "Design not found" }, { status: 404 });
-    }
-
-    const design = designSnap.data() as any;
-
-    const linkVersion = Number(link.versionNo || 1);
-    const currentVersion = Number(design.currentVersion || 1);
-
-    if (linkVersion !== currentVersion) {
-      return NextResponse.json(
-        {
-          error: `This link is for V${linkVersion}, but current design is V${currentVersion}`,
-        },
-        { status: 409 }
-      );
-    }
-
+    const { tokenId, secret } = parsePublicToken(publicToken);
+    const linkRef = adminDb.collection("approvalLinks").doc(tokenId);
     const now = Timestamp.now();
 
-    const designStatus =
-      decision === "approved" ? "approved" : "revision_requested";
+    await adminDb.runTransaction(async (tx) => {
+      const linkSnap = await tx.get(linkRef);
 
-    const approvalStage =
-      decision === "approved"
-        ? `v${linkVersion}_client_approved`
-        : `v${linkVersion}_revision_requested`;
+      if (!linkSnap.exists) throw new Error("Invalid approval link");
 
-    // update approval link
-    await linkRef.update({
-      status: decision,
-      finalized: true,
-      clientDecision: decision,
-      clientDimensions: dimensions,
-      clientNotes: notes,
-      clientSubmittedAt: now,
-      updatedAt: now,
-    });
+      const link = linkSnap.data() as any;
 
-    // update design
-    await designRef.update({
-      status: designStatus,
-      approvalStage,
-      clientDecision: decision,
-      clientDimensions: dimensions,
-      clientNotes: notes,
-      approvedVersion: decision === "approved" ? linkVersion : null,
-      updatedAt: now,
-    });
+      if (link.tokenHash !== hashSecret(secret)) {
+        throw new Error("Invalid approval link");
+      }
 
-    // update version record
-    const versionSnap = await adminDb
-      .collection("designVersions")
-      .where("designId", "==", link.designId)
-      .where("versionNo", "==", linkVersion)
-      .limit(1)
-      .get();
+      if (link.expiresAt?.toMillis && link.expiresAt.toMillis() < Date.now()) {
+        throw new Error("Approval link has expired");
+      }
 
-    if (!versionSnap.empty) {
-      await versionSnap.docs[0].ref.update({
-        status: designStatus,
+      if (link.finalized === true || ["approved", "rejected"].includes(link.status)) {
+        throw new Error("This approval has already been finalized and cannot be changed.");
+      }
+
+      const designRef = adminDb.collection("designs").doc(link.designId);
+      const designSnap = await tx.get(designRef);
+
+      if (!designSnap.exists) throw new Error("Design not found");
+
+      const design = designSnap.data() as any;
+
+      if (design.tenantId !== link.tenantId) {
+        throw new Error("Approval link mismatch");
+      }
+
+      tx.update(linkRef, {
+        status: decision,
+        finalized: true,
+        tokenUsed: true,
         clientDecision: decision,
         clientDimensions: dimensions,
         clientNotes: notes,
-        reviewedAt: now,
+        clientSubmittedAt: now,
         updatedAt: now,
       });
-    }
 
-    // 🔥 ALWAYS push to thread (this fixes your missing replies issue)
-    await adminDb.collection("designNotes").doc(crypto.randomUUID()).set({
-      designId: link.designId,
-      note:
-        notes ||
-        (decision === "approved"
-          ? "Approved this version"
-          : "Requested revision"),
-      actorSide: "client",
-      actorEmail: link.recipientEmail || "client",
-      actionType:
-        decision === "approved" ? "approved" : "revision_requested",
-      versionNo: linkVersion,
-      visibility: "both",
-      createdAt: now,
+      tx.update(designRef, {
+        status: decision,
+        approvalStage: decision === "approved" ? "client_approved" : "client_rejected",
+        clientDecision: decision,
+        clientDimensions: dimensions,
+        clientNotes: notes,
+        clientApprovedOrRejectedAt: now,
+        updatedAt: now,
+      });
+
+      const auditRef = adminDb.collection("auditLogs").doc(crypto.randomUUID());
+      tx.set(auditRef, {
+        tenantId: design.tenantId,
+        actorUid: "client-link",
+        actorEmail: link.recipientEmail || "client",
+        action: decision === "approved" ? "CLIENT_DESIGN_APPROVED" : "CLIENT_DESIGN_REJECTED",
+        module: "designs",
+        targetType: "design",
+        targetId: link.designId,
+        message: `Client ${decision} design: ${design.title || link.designId}`,
+        metadata: {
+          approvalLinkId: tokenId,
+          dimensions,
+          notes,
+        },
+        createdAt: now,
+      });
     });
 
-    // audit log
-    await adminDb.collection("auditLogs").doc(crypto.randomUUID()).set({
-      tenantId: design.tenantId || design.designerOrgId,
-      designerOrgId: design.designerOrgId || design.tenantId,
-      clientOrgId: design.clientOrgId || null,
-      actorEmail: link.recipientEmail || "client",
-      actorSide: "client",
-      action:
-        decision === "approved"
-          ? "CLIENT_APPROVED_VERSION"
-          : "CLIENT_REQUESTED_REVISION",
-      targetType: "design",
-      targetId: link.designId,
-      versionNo: linkVersion,
-      message:
-        decision === "approved"
-          ? `Client approved V${linkVersion}`
-          : `Client requested revision for V${linkVersion}`,
-      createdAt: now,
-    });
-
-    return NextResponse.json({
-      success: true,
-      status: designStatus,
-      versionNo: linkVersion,
-    });
-  } catch (err) {
+    return NextResponse.json({ success: true });
+  } catch (err: any) {
     console.error("approval submit error", err);
-    return NextResponse.json(
-      { error: "Server error" },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: err?.message || "Server error" }, { status: 400 });
   }
 }

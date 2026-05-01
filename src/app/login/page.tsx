@@ -3,184 +3,187 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import {
-  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
   sendPasswordResetEmail,
+  signInWithEmailAndPassword,
+  updateProfile,
 } from "firebase/auth";
-import { auth } from "@/lib/firebaseClient";
+import { doc, getDoc, serverTimestamp, setDoc } from "firebase/firestore";
+import { auth, db } from "@/lib/firebaseClient";
+import { APP_NAME } from "@/lib/appConfig";
+
+function slugifyCompany(value: string) {
+  return (
+    value
+      .toLowerCase()
+      .trim()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 40) || "company"
+  );
+}
 
 export default function LoginPage() {
   const router = useRouter();
 
+  const [mode, setMode] = useState<"login" | "signup">("login");
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [password, setPassword] = useState("123456");
+  const [name, setName] = useState("");
+  const [companyName, setCompanyName] = useState("");
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  async function login() {
-    if (!email || !password) {
-      alert("Email and password required.");
+  async function handleResetPassword() {
+    setError("");
+    setInfo("");
+
+    if (!email || !email.includes("@")) {
+      setError("Enter your email first, then click Forgot password.");
       return;
     }
 
+    await sendPasswordResetEmail(auth, email.trim().toLowerCase());
+    setInfo("Password reset email sent. Check your inbox.");
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    setInfo("");
+    setLoading(true);
+
     try {
-      const cred = await signInWithEmailAndPassword(auth, email.trim().toLowerCase(), password);
-      const userEmail = cred.user.email?.toLowerCase() || "";
+      const cleanEmail = email.trim().toLowerCase();
 
-      const profileRes = await fetch(`/api/users/get?email=${encodeURIComponent(userEmail)}`);
-      const profileJson = await profileRes.json();
-      const profile = profileJson.user;
+      if (mode === "signup") {
+        if (!companyName.trim()) {
+          throw new Error("Company name is required.");
+        }
 
-      if (!profile) {
-        alert("User profile not found. Please contact admin.");
-        return;
-      }
+        const userCred = await createUserWithEmailAndPassword(auth, cleanEmail, password);
+        const userId = userCred.user.uid;
 
-      if (profile.role === "superadmin" || profile.systemRole === "superadmin") {
-        router.push("/superadmin");
-        return;
-      }
+        if (name.trim()) {
+          await updateProfile(userCred.user, { displayName: name.trim() });
+        }
 
-      const roles = Array.isArray(profile.roles) ? profile.roles : [profile.side || profile.role];
+        const tenantId = `${slugifyCompany(companyName)}-${userId.slice(0, 8)}`;
 
-      if (roles.includes("designer") || String(profile.role || "").startsWith("designer_")) {
+        await setDoc(
+          doc(db, "tenants", tenantId),
+          {
+            tenantId,
+            name: companyName.trim(),
+            status: "active",
+            ownerUid: userId,
+            ownerEmail: cleanEmail,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        await setDoc(
+          doc(db, "users", userId),
+          {
+            uid: userId,
+            tenantId,
+            email: cleanEmail,
+            name: name.trim() || cleanEmail,
+            role: "superadmin",
+            status: "active",
+            emailVerified: false,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        await setDoc(doc(db, "auditLogs", crypto.randomUUID()), {
+          tenantId,
+          actorUid: userId,
+          actorEmail: cleanEmail,
+          action: "COMPANY_SIGNUP",
+          module: "auth",
+          targetType: "tenant",
+          targetId: tenantId,
+          message: "New company account created with owner as superadmin.",
+          createdAt: serverTimestamp(),
+        });
+
+        await sendEmailVerification(userCred.user);
+        setInfo("Account created. Verification email sent. You can continue to dashboard.");
         router.push("/dashboard");
         return;
       }
 
-      if (roles.includes("client") || String(profile.role || "").startsWith("client_")) {
-        router.push("/client/dashboard");
-        return;
+      const cred = await signInWithEmailAndPassword(auth, cleanEmail, password);
+      const snap = await getDoc(doc(db, "users", cred.user.uid));
+
+      if (!snap.exists()) {
+        throw new Error("Login exists in Firebase, but no app user profile was found. Ask superadmin to add this user.");
       }
 
-      router.push("/dashboard");
+      const user = snap.data() as any;
+
+      if (user.status !== "active") {
+        throw new Error("Your account is not active.");
+      }
+
+      router.push(user.role === "client" ? "/client/dashboard" : "/dashboard");
     } catch (err: any) {
-      console.error(err);
-      alert(err?.message || "Login failed.");
-    }
-  }
-
-  async function forgotPassword() {
-    const cleanEmail = email.trim().toLowerCase();
-
-    if (!cleanEmail) {
-      alert("Enter your email first, then click Forgot Password.");
-      return;
-    }
-
-    try {
-      await sendPasswordResetEmail(auth, cleanEmail);
-      alert("Password reset email sent.");
-    } catch (err: any) {
-      console.error(err);
-      alert(err?.message || "Could not send reset email.");
+      setError(err?.message || "Login failed");
+    } finally {
+      setLoading(false);
     }
   }
 
   return (
-    <main style={page}>
-      <div style={card}>
-        <h1 style={{ marginBottom: 4 }}>Design Appru</h1>
-        <p style={{ color: "#666", marginTop: 0 }}>Designer / Client Approval Portal</p>
-
-        <input
-          placeholder="Email"
-          value={email}
-          onChange={e => setEmail(e.target.value)}
-          style={input}
-        />
-
-        <input
-          placeholder="Password"
-          type="password"
-          value={password}
-          onChange={e => setPassword(e.target.value)}
-          style={input}
-        />
-
-        <button onClick={login} style={button}>
-          Login
-        </button>
-
-        <button onClick={forgotPassword} style={linkButton}>
-          Forgot Password?
-        </button>
-
-        <div style={divider} />
-
-        <p style={{ color: "#666", fontSize: 14 }}>
-          New designer company or client company?
+    <main className="min-h-screen bg-slate-100 flex items-center justify-center px-4">
+      <div className="w-full max-w-md rounded-2xl bg-white p-8 shadow-xl">
+        <h1 className="text-3xl font-bold text-slate-900">{APP_NAME}</h1>
+        <p className="mt-2 text-sm text-slate-500">
+          Login or register your company account.
         </p>
 
-        <a href="/register" style={outlineButton}>
-          Request Company Registration
-        </a>
+        <div className="mt-6 grid grid-cols-2 rounded-xl bg-slate-100 p-1">
+          <button type="button" onClick={() => setMode("login")} className={`rounded-lg py-2 text-sm font-semibold ${mode === "login" ? "bg-white shadow" : "text-slate-500"}`}>
+            Login
+          </button>
+          <button type="button" onClick={() => setMode("signup")} className={`rounded-lg py-2 text-sm font-semibold ${mode === "signup" ? "bg-white shadow" : "text-slate-500"}`}>
+            Register Company
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          {mode === "signup" && (
+            <>
+              <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" className="w-full rounded-xl border px-4 py-3" />
+              <input value={companyName} onChange={(e) => setCompanyName(e.target.value)} required placeholder="Company name" className="w-full rounded-xl border px-4 py-3" />
+            </>
+          )}
+
+          <input value={email} onChange={(e) => setEmail(e.target.value)} type="email" required placeholder="Email" className="w-full rounded-xl border px-4 py-3" />
+
+          <input value={password} onChange={(e) => setPassword(e.target.value)} type="password" required placeholder="Password" className="w-full rounded-xl border px-4 py-3" />
+
+          {mode === "login" && (
+            <button type="button" onClick={handleResetPassword} className="text-sm font-semibold text-blue-700 underline">
+              Forgot password?
+            </button>
+          )}
+
+          {error && <div className="rounded-xl bg-red-50 p-3 text-sm text-red-700">{error}</div>}
+          {info && <div className="rounded-xl bg-green-50 p-3 text-sm text-green-700">{info}</div>}
+
+          <button disabled={loading} className="w-full rounded-xl bg-slate-950 px-4 py-3 font-semibold text-white disabled:opacity-50">
+            {loading ? "Please wait..." : mode === "signup" ? "Create company account" : "Login"}
+          </button>
+        </form>
       </div>
     </main>
   );
 }
-
-const page: React.CSSProperties = {
-  minHeight: "100vh",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  background: "#f3f4f6",
-  padding: 20,
-};
-
-const card: React.CSSProperties = {
-  width: "100%",
-  maxWidth: 430,
-  padding: 28,
-  background: "white",
-  borderRadius: 16,
-  boxShadow: "0 10px 30px rgba(0,0,0,0.08)",
-};
-
-const input: React.CSSProperties = {
-  width: "100%",
-  padding: 13,
-  marginBottom: 12,
-  border: "1px solid #bbb",
-  borderRadius: 10,
-  fontSize: 15,
-};
-
-const button: React.CSSProperties = {
-  width: "100%",
-  padding: 13,
-  border: 0,
-  borderRadius: 10,
-  background: "#111827",
-  color: "white",
-  fontWeight: 800,
-  cursor: "pointer",
-  fontSize: 15,
-};
-
-const linkButton: React.CSSProperties = {
-  width: "100%",
-  marginTop: 10,
-  padding: 10,
-  border: 0,
-  background: "transparent",
-  color: "#2563eb",
-  fontWeight: 700,
-  cursor: "pointer",
-};
-
-const outlineButton: React.CSSProperties = {
-  display: "block",
-  textAlign: "center",
-  width: "100%",
-  padding: 12,
-  border: "1px solid #111827",
-  borderRadius: 10,
-  color: "#111827",
-  textDecoration: "none",
-  fontWeight: 800,
-};
-
-const divider: React.CSSProperties = {
-  height: 1,
-  background: "#e5e7eb",
-  margin: "18px 0",
-};
