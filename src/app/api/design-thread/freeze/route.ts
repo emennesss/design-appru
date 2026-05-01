@@ -1,24 +1,45 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "@/lib/firebaseAdmin";
+import { adminAuth, adminDb } from "@/lib/firebaseAdmin";
+import { hasPermission } from "@/lib/permissions";
 import { Timestamp } from "firebase-admin/firestore";
+
+async function getActor(req: NextRequest) {
+  const authHeader = req.headers.get("authorization") || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : "";
+
+  if (!token) throw new Error("Missing auth token");
+
+  const decoded = await adminAuth.verifyIdToken(token);
+  const snap = await adminDb.collection("users").doc(decoded.uid).get();
+
+  if (!snap.exists) throw new Error("User not found");
+
+  const user = snap.data() as any;
+
+  if (user.status !== "active") throw new Error("Inactive user");
+
+  return {
+    uid: decoded.uid,
+    email: decoded.email,
+    role: user.role,
+    tenantId: user.tenantId,
+  };
+}
 
 export async function POST(req: NextRequest) {
   try {
+    const actor = await getActor(req);
+
+    if (!hasPermission(actor.role, "approval_send")) {
+      return NextResponse.json({ error: "Not allowed" }, { status: 403 });
+    }
+
     const body = await req.json();
-    const { designId, token, actorEmail, freezeNote } = body;
+    const designId = String(body.designId || "");
 
-    if (!designId || !token) {
-      return NextResponse.json({ error: "designId and token required" }, { status: 400 });
+    if (!designId) {
+      return NextResponse.json({ error: "Missing designId" }, { status: 400 });
     }
-
-    const linkRef = adminDb.collection("approvalLinks").doc(token);
-    const linkSnap = await linkRef.get();
-
-    if (!linkSnap.exists) {
-      return NextResponse.json({ error: "Invalid approval link" }, { status: 404 });
-    }
-
-    const link = linkSnap.data() as any;
 
     const designRef = adminDb.collection("designs").doc(designId);
     const designSnap = await designRef.get();
@@ -29,23 +50,15 @@ export async function POST(req: NextRequest) {
 
     const design = designSnap.data() as any;
 
-    const linkVersion = Number(link.versionNo || 1);
-    const currentVersion = Number(design.currentVersion || 1);
-    const approvedVersion = Number(design.approvedVersion || 0);
-
-    // 🔒 Critical version check
-    if (linkVersion !== currentVersion || approvedVersion !== linkVersion) {
-      return NextResponse.json(
-        {
-          error: `Only approved current version can be frozen. Link V${linkVersion}, current V${currentVersion}, approved V${approvedVersion}`,
-        },
-        { status: 409 }
-      );
+    // Tenant protection
+    if (design.tenantId !== actor.tenantId) {
+      return NextResponse.json({ error: "Cross-tenant access denied" }, { status: 403 });
     }
 
-    if (design.status !== "approved") {
+    // Only allow freeze after client approval
+    if (design.clientDecision !== "approved") {
       return NextResponse.json(
-        { error: "Design must be approved before freeze." },
+        { error: "Cannot freeze. Client has not approved." },
         { status: 400 }
       );
     }
@@ -53,35 +66,29 @@ export async function POST(req: NextRequest) {
     const now = Timestamp.now();
 
     await designRef.update({
-      status: "frozen",
-      approvalStage: `v${linkVersion}_client_final_frozen`,
-      frozen: true,
+      approvalStage: "final_frozen",
       frozenAt: now,
-      frozenByEmail: actorEmail || link.recipientEmail || "client",
-      frozenVersion: linkVersion,
-      frozenFileUrl: link.versionFileUrl || design.latestFileUrl || "",
-      frozenFileName: link.versionFileName || design.latestFileName || "",
-      freezeNote: freezeNote || "",
+      frozenBy: actor.uid,
+      frozenByEmail: actor.email,
       updatedAt: now,
     });
 
-    await adminDb.collection("auditLogs").doc(crypto.randomUUID()).set({
-      tenantId: design.tenantId || design.designerOrgId,
-      designerOrgId: design.designerOrgId || design.tenantId,
-      clientOrgId: design.clientOrgId || null,
-      actorEmail: actorEmail || link.recipientEmail || "client",
-      actorSide: "client",
-      action: "CLIENT_FINAL_FREEZE",
+    await adminDb.collection("auditLogs").doc().set({
+      tenantId: actor.tenantId,
+      actorUid: actor.uid,
+      actorEmail: actor.email,
+      action: "DESIGN_FROZEN",
+      module: "designs",
       targetType: "design",
       targetId: designId,
-      versionNo: linkVersion,
-      message: `Client froze V${linkVersion}: ${design.title || designId}`,
+      message: "Design frozen after client approval",
       createdAt: now,
     });
 
     return NextResponse.json({ success: true });
-  } catch (err) {
+
+  } catch (err: any) {
     console.error("freeze error", err);
-    return NextResponse.json({ error: "Server error" }, { status: 500 });
+    return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
