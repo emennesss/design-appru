@@ -41,7 +41,7 @@ export default function ClientFilesPage() {
 
     const q = query(
       collection(db, "designs"),
-      where("latestApprovalRecipientEmail", "==", email)
+      where("assignedApproverEmails", "array-contains", email)
     );
 
     const unsub = onSnapshot(q, (snap) => {
