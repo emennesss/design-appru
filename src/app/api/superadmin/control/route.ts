@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebaseAdmin";
 import { requireSuperadminEmail } from "@/lib/superadminGuard";
 import { Timestamp } from "firebase-admin/firestore";
+import { sanitizeEditableRole } from "@/lib/rolePolicy";
 
 function cleanId(v: string) {
   return String(v || "").trim().toLowerCase().replace(/[^a-z0-9]/g, "_");
@@ -83,7 +84,7 @@ export async function POST(req: NextRequest) {
       if (!email) return NextResponse.json({ error: "Email required" }, { status: 400 });
 
       const side = body.side === "client" ? "client" : "designer";
-      const role = String(body.role || (side === "client" ? "client_approver" : "designer_staff"));
+      const role = sanitizeEditableRole(String(body.email || ""), String(body.role || (side === "client" ? "client" : "designer")));
       const designerOrgId = body.designerOrgId || "default";
       const clientOrgId = body.clientOrgId || "";
 
